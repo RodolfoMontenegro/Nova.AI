@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Upload Documentation</title>
+    <style>
+        body {
+            font-family: 'Roboto', sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #f9f9f9;
+            color: #333;
+        }
+        header {
+            background-color: #4CAF50;
+            color: #fff;
+            padding: 20px 0;
+            text-align: center;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+        nav {
+            display: flex;
+            justify-content: center;
+            background-color: #333;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+        nav a {
+            color: #fff;
+            padding: 14px 20px;
+            text-decoration: none;
+            text-align: center;
+            background-color: #333;
+            border-radius: 4px;
+            margin: 0 10px;
+            transition: background-color 0.3s;
+        }
+        nav a:hover {
+            background-color: #4CAF50;
+        }
+        .container {
+            padding: 40px;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        footer {
+            background-color: #333;
+            color: #fff;
+            text-align: center;
+            padding: 20px 0;
+            position: fixed;
+            width: 100%;
+            bottom: 0;
+            box-shadow: 0 -2px 4px rgba(0, 0, 0, 0.1);
+        }
+        form {
+            margin-bottom: 20px;
+        }
+        label {
+            font-weight: bold;
+        }
+        input[type="file"],
+        input[type="url"] {
+            width: 100%;
+            padding: 10px;
+            margin-top: 10px;
+            margin-bottom: 20px;
+            border-radius: 4px;
+            border: 1px solid #ccc;
+            font-family: 'Roboto', sans-serif;
+        }
+        input[type="submit"] {
+            background-color: #4CAF50;
+            color: #fff;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        input[type="submit"]:hover {
+            background-color: #45a049;
+        }
+        textarea {
+            width: 100%;
+            height: 300px;
+            margin-top: 20px;
+            padding: 10px;
+            border-radius: 4px;
+            border: 1px solid #ccc;
+            font-family: 'Roboto', sans-serif;
+        }
+        .back-button {
+            margin-top: 20px;
+            display: inline-block;
+            padding: 10px 20px;
+            background-color: #4CAF50;
+            color: #fff;
+            text-decoration: none;
+            border-radius: 4px;
+            transition: background-color 0.3s;
+        }
+        .back-button:hover {
+            background-color: #45a049;
+        }
+        .message {
+            margin-top: 20px;
+            padding: 10px;
+            border-radius: 4px;
+            background-color: #f0f0f0;
+            border: 1px solid #ccc;
+        }
+        .message.success {
+            background-color: #d4edda;
+            border-color: #c3e6cb;
+            color: #155724;
+        }
+        .message.error {
+            background-color: #f8d7da;
+            border-color: #f5c6cb;
+            color: #721c24;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Upload Documentation</h1>
+    </header>
+    <nav>
+        <a href="/">Home</a>
+    </nav>
+    <div class="container">
+        <form action="{{ url_for('upload_documentation') }}" method="post" enctype="multipart/form-data">
+            <label for="file">Choose a file (PDF or Text):</label>
+            <input type="file" id="file" name="file" accept=".pdf,.txt">
+            <br><br>
+            <label for="url">Or enter a URL to extract content from:</label>
+            <input type="url" id="url" name="url" placeholder="Or enter a URL (e.g., https://example.com/documentation)">
+            <br><br>
+            <input type="submit" value="Upload">
+        </form>
+        {% if message %}
+            <div class="message {% if 'successfully' in message %}success{% else %}error{% endif %}">
+                {{ message }}
+            </div>
+        {% endif %}
+        {% if extracted_text %}
+            <h2>Extracted Text</h2>
+            <textarea readonly>{{ extracted_text }}</textarea>
+        {% endif %}
+        <a class="back-button" href="/">Back to Home</a>
+    </div>
+    <footer>
+        <p>© 2024 Nova Layers. All rights reserved.</p>
+    </footer>
+    <script>
+        document.querySelector('form').addEventListener('submit', function(e) {
+            const fileInput = document.getElementById('file');
+            const urlInput = document.getElementById('url');
+            if (fileInput.files.length === 0 && !urlInput.value) {
+                e.preventDefault();
+                alert('Please select a file or enter a URL.');
+            }
+        });
+    </script>
+</body>
+</html>

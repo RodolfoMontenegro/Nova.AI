@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chat with Nova.AI</title>
+    <style>
+        body {
+            font-family: 'Arial', sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #121212;
+            display: flex;
+            flex-direction: column;
+            min-height: 100vh;
+            color: #ffffff;
+        }
+        header {
+            background-color: #1E88E5;
+            color: #fff;
+            padding: 20px;
+            text-align: center;
+            position: relative;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+        }
+        header h1 {
+            margin: 0;
+            font-size: 24px;
+        }
+        header .back-home {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background-color: #ffffff;
+            color: #1E88E5;
+            border: none;
+            border-radius: 4px;
+            padding: 8px 16px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        header .back-home:hover {
+            background-color: #f4f4f9;
+        }
+        .container {
+            flex: 1;
+            padding: 20px;
+            max-width: 800px;
+            margin: 20px auto;
+            background-color: #1E1E1E;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+            border-radius: 10px;
+        }
+        .chat-box {
+            height: 400px;
+            overflow-y: auto;
+            margin-bottom: 20px;
+            padding: 10px;
+            border: 1px solid #333;
+            border-radius: 8px;
+            background-color: #2C2C2C;
+        }
+        .message {
+            display: flex;
+            align-items: flex-start;
+            margin-bottom: 15px;
+        }
+        .message.user {
+            justify-content: flex-end;
+        }
+        .message.user .text {
+            background-color: #1E88E5;
+            color: #fff;
+        }
+        .message.bot {
+            flex-direction: row;
+        }
+        .message.bot .text {
+            background-color: #333;
+            color: #e0e0e0;
+        }
+        .text {
+            display: inline-block;
+            padding: 10px 15px;
+            border-radius: 12px;
+            max-width: 70%;
+            word-wrap: break-word;
+            font-size: 14px;
+        }
+        form {
+            display: flex;
+            align-items: center;
+            margin-top: auto;
+        }
+        textarea {
+            flex: 1;
+            padding: 10px;
+            border: 1px solid #333;
+            border-radius: 8px;
+            margin-right: 10px;
+            font-family: 'Arial', sans-serif;
+            font-size: 14px;
+            resize: vertical;
+            height: 50px;
+            background-color: #2C2C2C;
+            color: #ffffff;
+        }
+        button {
+            padding: 12px 24px;
+            background-color: #1E88E5;
+            color: #fff;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 16px;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #1565C0;
+        }
+        footer {
+            background-color: #1E88E5;
+            color: #fff;
+            text-align: center;
+            padding: 10px 0;
+            margin-top: auto;
+        }
+        .avatar {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            margin-right: 10px;
+            background-color: #ffffff;
+        }
+        .avatar img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            border-radius: 50%;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Chat with Nova.AI</h1>
+        <button class="back-home" onclick="window.location.href='/';">Back to Home</button>
+    </header>
+    <div class="container">
+        <div class="chat-box" id="chat-box">
+            <!-- Chat messages will be dynamically inserted here -->
+        </div>
+        <form id="chat-form">
+            <textarea id="nl_query" name="nl_query" placeholder="Ask Nova.AI a question..." required></textarea>
+            <button type="submit">Send</button>
+        </form>
+    </div>
+    <footer>
+        <p>© 2024 NovaLayers. All rights reserved.</p>
+    </footer>
+
+    <script>
+        document.getElementById('chat-form').addEventListener('submit', function(event) {
+            event.preventDefault(); // Prevents the default form submission behavior
+
+            const nl_query = document.getElementById('nl_query').value.trim();
+            const chatBox = document.getElementById('chat-box');
+
+            if (nl_query === "") return; // Prevent empty submissions
+
+            // Display the user's message
+            const userMessageDiv = document.createElement('div');
+            userMessageDiv.classList.add('message', 'user');
+            userMessageDiv.innerHTML = `<div class="text">${nl_query}</div>`;
+            chatBox.appendChild(userMessageDiv);
+            chatBox.scrollTop = chatBox.scrollHeight;
+
+            // Clear the textarea
+            document.getElementById('nl_query').value = "";
+
+            // Perform AJAX fetch request to POST the data
+            fetch('/translate', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ nl_query: nl_query }) // Send the query as JSON
+            })
+            .then(response => response.json())
+            .then(data => {
+                // Display the bot's response
+                const botMessageDiv = document.createElement('div');
+                botMessageDiv.classList.add('message', 'bot');
+                
+                const avatar = `<div class="avatar"><img src="/static/images/nova.jpeg" alt="Nova.AI"></div>`;
+                
+                if (data.response) {
+                    botMessageDiv.innerHTML = `${avatar}<div class="text">${data.response}</div>`;
+                } else if (data.error) {
+                    botMessageDiv.innerHTML = `${avatar}<div class="text" style="color: red;">${data.error}</div>`;
+                }
+                
+                chatBox.appendChild(botMessageDiv);
+                chatBox.scrollTop = chatBox.scrollHeight;
+            })
+            .catch(error => {
+                // Handle any errors during the fetch
+                const errorDiv = document.createElement('div');
+                errorDiv.classList.add('message', 'bot');
+                errorDiv.innerHTML = `<div class="text" style="color: red;">Error occurred: ${error.message}</div>`;
+                chatBox.appendChild(errorDiv);
+                chatBox.scrollTop = chatBox.scrollHeight;
+            });
+        });
+    </script>
+</body>
+</html>
+

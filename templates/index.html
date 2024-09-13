@@ -1,0 +1,184 @@
+<!-- templates/index.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Home</title>
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/css/bootstrap.min.css">
+    <style>
+        body {
+            font-family: 'Roboto', sans-serif;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            min-height: 100vh;
+            color: #333;
+            background: url('/static/images/nova.jpeg') no-repeat center center fixed;
+            background-size: cover;
+            overflow-y: auto;
+        }
+        nav {
+            width: 200px;
+            background-color: rgba(51, 51, 51, 0.8);
+            color: #fff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding-top: 20px;
+            position: fixed;
+            height: 100%;
+            box-shadow: 2px 0 5px rgba(0, 0, 0, 0.1);
+            z-index: 1000;
+        }
+        nav a {
+            color: #fff;
+            padding: 20px;
+            text-decoration: none;
+            text-align: center;
+            width: 100px;
+            height: 100px;
+            transition: background-color 0.3s, color 0.3s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 10px 0;
+            border-radius: 10px;
+        }
+        nav a:hover {
+            background-color: #4CAF50;
+            color: #fff;
+            background-image: url('/static/images/novico.jpeg');
+            background-size: cover;
+            background-repeat: no-repeat;
+            background-position: center;
+        }
+        .content {
+            flex: 1;
+            margin-left: 200px;
+            padding: 40px;
+            overflow-y: auto;
+        }
+        header {
+            background-color: rgba(0, 0, 0, 0.5); /* Transparent background */
+            color: #fff;
+            padding: 20px 0;
+            text-align: center;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            width: 100%;
+            position: relative;
+            z-index: 1;
+        }
+        header h1 {
+            font-size: 2.5em;
+            font-weight: bold;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
+        }
+        .main-content {
+            flex-grow: 1;
+            padding: 20px 0;
+            width: 100%;
+            position: relative;
+            z-index: 1;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background-color: rgba(255, 255, 255, 0.5); /* Transparent container */
+            border-radius: 8px;
+            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+            padding: 30px;
+            margin-bottom: 20px;
+            border: 1px solid rgba(0, 0, 0, 0.1);
+            backdrop-filter: blur(5px); /* Slight blur to make the text stand out */
+        }
+        .container h2 {
+            font-size: 1.8em;
+        }
+        .container p, .container ul {
+            font-size: 1.1em;
+            line-height: 1.6;
+        }
+        footer {
+            background-color: rgba(0, 0, 0, 0.5); /* Transparent footer */
+            color: #fff;
+            text-align: center;
+            padding: 10px 0;
+            margin-top: auto;
+            box-shadow: 0 -2px 6px rgba(0, 0, 0, 0.2);
+            width: 100%;
+            position: relative;
+            z-index: 1;
+        }
+        footer p {
+            margin: 0;
+            font-size: 0.9em;
+        }
+        @media (max-width: 768px) {
+            nav {
+                width: 100%;
+                height: auto;
+                position: relative;
+                flex-direction: row;
+                justify-content: space-around;
+                box-shadow: none;
+            }
+            nav a {
+                width: auto;
+                height: auto;
+                margin: 5px;
+            }
+            .content {
+                margin-left: 0;
+                padding: 20px;
+            }
+            header {
+                padding: 20px 0;
+            }
+            .container {
+                padding: 20px;
+            }
+            footer {
+                padding: 15px 0;
+            }
+        }
+    </style>
+</head>
+<body>
+    <nav>
+        <a class="navbar-brand" href="/">Home</a>
+        <a class="nav-link" href="/ddl">Fetch DDL Statements</a>
+        <a class="nav-link" href="/query">Nova.AI Database</a>
+        <a class="nav-link" href="/translate">Nova.AI Analyst</a>
+        <a class="nav-link" href="/get_training_data">Manage RAG Data</a>
+        <a class="nav-link" href="/upload">Upload Docs.</a>
+    </nav>
+    <div class="content">
+        <header>
+            <h1>Welcome to Nova.AI!</h1>
+        </header>
+        <div class="main-content">
+            <div class="container">
+                <h2>Nova Layers</h2>
+                <p>Welcome to Nova.AI! Use the navigation bar to:</p>
+                <ul>
+                    <li><strong>Fetch DDL Statements:</strong> Inspect the structure of your database tables.</li>
+                    <li><strong>Nova.AI Database:</strong> Nova.AI will chat with your database, generate/execute SQL queries and view the results.</li>
+                    <li><strong>Nova.AI Analyst:</strong> Nova.AI bot can be your copilot for your local data analysis. Just ask!</li>
+                    <li><strong>Manage RAG Data:</strong> View and manage the training data stored in the system.</li>
+                    <li><strong>Upload Documentation:</strong> Add and process new documentation to enhance your system's knowledge base.</li>
+                </ul>
+            </div>
+        </div>
+        <footer>
+            <p>© 2024 Nova Layers. All rights reserved.</p>
+        </footer>
+    </div>
+
+    <script src="https://code.jquery.com/jquery-3.3.1.slim.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/popper.js/1.14.7/umd/popper.min.js"></script>
+    <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/js/bootstrap.min.js"></script>
+</body>
+</html>
+

@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Training Data</title>
+    <style>
+        body {
+            font-family: 'Roboto', sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #f9f9f9;
+            color: #333;
+            display: flex;
+            flex-direction: column;
+            min-height: 100vh;
+        }
+        header {
+            background-color: #4CAF50;
+            color: #fff;
+            padding: 20px 0;
+            text-align: center;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+        nav {
+            display: flex;
+            justify-content: center;
+            background-color: #333;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+        nav a {
+            color: #fff;
+            padding: 14px 20px;
+            text-decoration: none;
+            text-align: center;
+            background-color: #333;
+            border-radius: 4px;
+            margin: 0 10px;
+            transition: background-color 0.3s;
+        }
+        nav a:hover {
+            background-color: #4CAF50;
+        }
+        .container {
+            padding: 40px;
+            max-width: 800px;
+            margin: 0 auto;
+            flex: 1;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+        table, th, td {
+            border: 1px solid #ddd;
+        }
+        th, td {
+            padding: 12px;
+            text-align: left;
+        }
+        th {
+            background-color: #4CAF50;
+            color: white;
+        }
+        footer {
+            background-color: #333;
+            color: #fff;
+            text-align: center;
+            padding: 10px 0;
+            box-shadow: 0 -2px 4px rgba(0, 0, 0, 0.1);
+        }
+        button, input[type="text"], select {
+            padding: 10px;
+            font-size: 16px;
+            margin: 10px 0;
+            border-radius: 4px;
+            border: 1px solid #ccc;
+            box-sizing: border-box;
+            width: 100%;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Training Data</h1>
+    </header>
+    <nav>
+        <a href="/">Home</a>
+        <a href="/ddl">Fetch DDL Statements</a>
+        <a href="/query">SQL Query Executor</a>
+        <a href="/translate">Natural Language to SQL</a>
+        <a href="/get_training_data">Manage Training Data</a>
+    </nav>
+    <div class="container">
+        <h2>Training Data Overview</h2>
+        {% if data %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Question</th>
+                        <th>Content</th>
+                        <th>Type</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in data %}
+                        <tr>
+                            <td>{{ row['id'] }}</td>
+                            <td>{{ row['question'] }}</td>
+                            <td>{{ row['content'] }}</td>
+                            <td>{{ row['training_data_type'] }}</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% else %}
+            <p>No training data available.</p>
+        {% endif %}
+
+        <h3>Manage Training Data</h3>
+        <form action="/remove_training_data" method="POST">
+            <label for="id">Remove Training Data by ID:</label>
+            <input type="text" id="id" name="id" placeholder="Enter ID to remove">
+            <button type="submit">Remove Training Data</button>
+        </form>
+
+        <form action="/remove_collection" method="POST">
+            <label for="collection_name">Remove and Recreate Collection:</label>
+            <select id="collection_name" name="collection_name">
+                <option value="sql">SQL Collection</option>
+                <option value="ddl_collection">DDL Collection</option>
+                <option value="documentation">Documentation Collection</option>
+            </select>
+            <button type="submit">Remove Collection</button>
+        </form>
+    </div>
+    <footer>
+        <p>© 2024 Nova Layers. All rights reserved.</p>
+    </footer>
+</body>
+</html>
+
