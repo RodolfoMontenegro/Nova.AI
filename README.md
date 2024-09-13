@@ -28,6 +28,8 @@ Nova.AI is a Python-based application designed to translate natural language int
 3. Install the dependencies:
     ```bash
     pip install -r requirements.txt
+    python -m spacy download en_core_web_sm
+    python -m spacy download es_core_news_sm
     ```
 
 4. Set up Docker (if required):
