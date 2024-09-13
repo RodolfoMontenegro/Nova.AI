@@ -40,13 +40,13 @@ Nova.AI is a Python-based application designed to translate natural language int
 To run the main application, execute:
 ```bash
 python mapa.py
+ ```
 
-
-Contributing
+## Contributing
 Contributions are welcome! Please fork the repository and create a pull request with your changes. Ensure your code adheres to the project’s coding standards and includes appropriate tests.
 
-License
+## License
 This project is licensed under the Apache License 2.0 - see the LICENSE file for details.
 
-Contact
+## Contact
 For any questions or suggestions, feel free to open an issue or contact Rodolfo Montenegro Ochoa.
