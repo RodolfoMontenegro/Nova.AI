@@ -100,7 +100,7 @@ greetings_en = [
 ]
 greetings_es = [
     "hola", "buenos días", "buenas tardes", "buenas noches", "saludos",
-    "hola, ¿qué tal?", "¿cómo estás?", "¿qué pasa?", "¿qué hay?", "sup", "buenas", "muy buenas", "¿qué onda?", "¿qué tal?"
+    "ola, ¿qué tal?", "¿cómo estás?", "¿qué pasa?", "¿qué hay?", "sup", "buenas", "muy buenas", "¿qué onda?", "¿qué tal?"
 ]
 
 # Initialize PhraseMatcher for English and Spanish
@@ -115,17 +115,28 @@ matcher_es.add("GREETING_ES", patterns_es)
 
 def is_greeting(text, language):
     """Detect if the text is a greeting based on the language."""
+    logging.info(f"Checking if '{text}' is a greeting in {language}...")
+
     if language == "es":
         doc = nlp_es(text)
         matches = matcher_es(doc)
-        return len(matches) > 0
+        logging.info(f"Greeting matches in Spanish: {matches}")
+        if len(matches) > 0:
+            return True
+        # Fallback to simple string matching
+        return text.lower() in greetings_es
     else:
         doc = nlp_en(text)
         matches = matcher_en(doc)
-        return len(matches) > 0
+        logging.info(f"Greeting matches in English: {matches}")
+        if len(matches) > 0:
+            return True
+        return text.lower() in greetings_en
 
 def is_general_concept(text, language):
     """Detect if the text is a general concept question (e.g., asking for explanations)."""
+    logging.info(f"Checking if '{text}' is a general concept in {language}...")
+
     if language == "es":
         doc = nlp_es(text)
     else:
@@ -135,6 +146,7 @@ def is_general_concept(text, language):
     general_concepts_list = general_concepts.get(language, [])
     for token in doc:
         if token.text.lower() in general_concepts_list:
+            logging.info(f"Found general concept keyword: {token.text}")
             return True
     return False
 
@@ -402,14 +414,25 @@ def chat_with_bot(question):
 def chat_with_bot_and_learn(question, chat_history=[]):
     """Interact with the bot using a RAG model, maintaining chat history for learning."""
     try:
-        # Detect the language of the question
+        # Manually detect common greetings first
+        if question.lower() in greetings_es:
+            logging.info(f"'{question}' is recognized as a Spanish greeting.")
+            return "¡Hola! Parece que me estás saludando. ¿Cómo puedo asistirte con datos o análisis hoy?"
+        elif question.lower() in greetings_en:
+            logging.info(f"'{question}' is recognized as an English greeting.")
+            return "Hello! It seems like you're greeting me. How can I assist you with data or analysis today?"
+
+        # If it's not a common greeting, detect the language using langdetect
         try:
             language = langdetect.detect(question)
         except langdetect.lang_detect_exception.LangDetectException:
             language = "en"  # Default to English if detection fails
 
+        logging.info(f"Detected language: {language}")
+
         # Check if it's a greeting using PhraseMatcher
         if is_greeting(question, language):
+            logging.info(f"'{question}' is a greeting in {language}.")
             if language == "es":
                 return "¡Hola! Parece que me estás saludando. ¿Cómo puedo asistirte con datos o análisis hoy?"
             else:
@@ -433,18 +456,8 @@ def chat_with_bot_and_learn(question, chat_history=[]):
 
             response = analysis_response.get("message", {}).get("content", "Could not generate a response.")
 
-            # Translate the response to Spanish if needed
-            if language == "es":
-                response = translate_to_spanish(response)
-
-            # Update chat history and embed it
-            chat_entry = {
-                "user_input": question,
-                "bot_response": response
-            }
-            chat_history.append(chat_entry)
-            embed_chat_history(chat_history, ollama_client, model)
-
+            # No need to translate as the model supports multiple languages
+            # Just return the response
             return response
 
         # Step 3: If it's SQL-related or data-driven, query ChromaDB
@@ -473,19 +486,7 @@ def chat_with_bot_and_learn(question, chat_history=[]):
 
         response = analysis_response.get("message", {}).get("content", "Could not generate a response.")
         
-        # Translate the response if needed
-        if language == "es":
-            response = translate_to_spanish(response)
-
-        # Step 5: Update chat history and embed it into ChromaDB
-        chat_entry = {
-            "user_input": question,
-            "bot_response": response
-        }
-        chat_history.append(chat_entry)
-
-        embed_chat_history(chat_history, ollama_client, model)
-
+        # Return the response as-is, no translation necessary
         return response
 
     except Exception as e:
@@ -561,16 +562,25 @@ def query_chromadb_collection(prompt, collection_name):
         )
 
         if results['ids']:
-            data = results['documents'][0][0]
-            logging.info(f"Retrieved relevant information from {collection_name} collection: {data}")
-            return data
+            # Check if documents array is non-empty and well-formed
+            if len(results['documents']) > 0 and len(results['documents'][0]) > 0:
+                data = results['documents'][0][0]
+                logging.info(f"Retrieved relevant information from {collection_name} collection: {data}")
+                return data
+            else:
+                logging.warning(f"Documents array is empty in {collection_name} collection.")
+                return None
         else:
-            logging.warning(f"No matching document found in the {collection_name} collection.")
+            logging.warning(f"No matching document found in {collection_name}.")
             return None
 
+    except json.JSONDecodeError as e:
+        logging.error(f"Error decoding JSON response from {collection_name} collection: {e}")
+        return None
     except Exception as e:
         logging.error(f"Error querying {collection_name} collection: {e}")
         return None
+
 
 def apply_schema_to_sql(conn, sql_query):
     """Apply detected schemas to the table names in the SQL query."""
@@ -788,35 +798,44 @@ def ingest_sql_into_chromadb(sql_query, question, collection_name="sql_collectio
     global client, ef  # Ensure global client and embedding function are accessible
 
     try:
-        # Generate a document ID based on the SQL query or question
+        # Ensure client and embedding function are initialized
+        if not client or not ef:
+            logging.error("ChromaDB client or embedding function is not initialized.")
+            return
+
+        # Generate a unique document ID based on the SQL query or question
         doc_id = hashlib.md5(sql_query.encode('utf-8')).hexdigest()
 
         # Get or create the specified collection by name
         collection = client.get_or_create_collection(name=collection_name, embedding_function=ef)
 
-        # Check if the document already exists in the collection
+        # Check if the document with the same ID already exists in the collection
         existing = collection.get(ids=[doc_id])
-        if existing['ids']:
+        if existing and existing['ids']:
             logging.warning(f"SQL query with ID {doc_id} already exists in {collection_name}. Skipping ingestion.")
             return
 
-        # Generate embedding using Ollama
+        # Generate embedding for the SQL query and the question using Ollama
         response = ollama.embeddings(
-            model="bge-m3",  # Replace with the correct embedding model name
+            model="bge-m3",  # Ensure the embedding model matches your setup
             prompt=f"SQL Query: {sql_query}\nQuestion: {question}"
         )
 
+        # Extract the embedding vector from the response
         embedding = response.get("embedding")
         if embedding:
-            # Store the SQL query and its embedding in the specified collection
+            # Ingest the SQL query, question, and embedding into the specified collection
             collection.add(
                 ids=[doc_id],
                 embeddings=[embedding],
-                documents=[sql_query]
+                documents=[json.dumps({
+					"sql": sql_query,
+					"question": question
+				})] # Store both the SQL query and the question as the document
             )
             logging.info(f"SQL query successfully ingested into ChromaDB '{collection_name}' collection.")
         else:
-            logging.error(f"Failed to generate embedding for SQL query in {collection_name}.")
+            logging.error(f"Invalid embedding format. Expected a list of floating-point values.")
 
     except Exception as e:
         logging.error(f"Error ingesting SQL query into ChromaDB {collection_name}: {e}")
@@ -933,13 +952,29 @@ def get_training_data() -> pd.DataFrame:
 
     for collection_name, training_data_type in collections.items():
         try:
-            data = client.get_collection(collection_name).get()
+            # Fetch the collection from ChromaDB
+            collection = client.get_collection(collection_name)
+            data = collection.get()
+
+            # Check if the collection has the expected keys: "documents" and "ids"
             if data and "documents" in data and "ids" in data:
-                documents = [json.loads(doc) if training_data_type == "sql" else doc for doc in data["documents"]]
-                ids = data["ids"]
-                
+                # Handle SQL collection differently as it might have JSON-encoded documents
+                if training_data_type == "sql":
+                    documents = [json.loads(doc) if training_data_type == "sql" else doc for doc in data["documents"]]
+                else:
+                    documents = []
+                    for doc in data["documents"]:
+                        try:
+                            if training_data_type == "sql":
+                                documents.append(json.loads(doc))
+                            else:
+                                documents.append(doc)
+                        except json.JSONDecodeError:
+                            logging.error(f"Failed to parse document in {collection_name}: {doc}")
+
+                # Prepare the DataFrame for each collection
                 df = pd.DataFrame({
-                    "id": ids,
+                    "id": data["ids"],
                     "content": [doc if training_data_type != "sql" else doc.get("sql", "") for doc in documents],
                     "training_data_type": training_data_type
                 })
@@ -950,15 +985,21 @@ def get_training_data() -> pd.DataFrame:
                 else:
                     df["question"] = None
 
+                # Append the DataFrame to the list
                 df_list.append(df)
+            else:
+                logging.warning(f"No valid data found in collection {collection_name}.")
+
         except Exception as e:
             logging.error(f"Error fetching data from collection {collection_name}: {e}")
 
+    # Concatenate all DataFrames if data was found in any collection
     if df_list:
         combined_df = pd.concat(df_list, ignore_index=True)
         return combined_df
 
-    return pd.DataFrame()  # Return an empty DataFrame if no data is found
+    # Return an empty DataFrame if no data is found
+    return pd.DataFrame()
 
 def remove_training_data(id: str) -> bool:
     collection_suffix_map = {
