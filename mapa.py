@@ -315,37 +315,44 @@ def chat_with_bot(question):
                 if 'geom' in chromadb_response.lower():
                     logging.info("Detected 'geom' column in DDL. Routing to spatial query logic.")
 
-                    # Retrieve relevant spatial documentation to generate a PostGIS SQL query
-                    spatial_docs_response = query_chromadb(question, collection_name="documentation_collection")
+                    # Attempt to retrieve relevant spatial documentation from ChromaDB to generate a PostGIS SQL query
+                    spatial_docs_response = query_chromadb_collection(question, collection_name="documentation_collection")
+
                     if spatial_docs_response:
                         logging.info(f"Retrieved relevant spatial documentation: {spatial_docs_response}")
 
                         # Generate SQL query using the retrieved documentation
                         sql_translation_prompt = f"Using the following PostGIS documentation: {spatial_docs_response}, translate this natural language query to a PostGIS SQL query: {question}"
-                        sql_translation_response = submit_prompt(ollama_client, model, sql_translation_prompt, ollama_options, keep_alive)
-
-                        if isinstance(sql_translation_response, str):
-                            sql_translation_response = json.loads(sql_translation_response)
-
-                        sql_query = extract_sql(sql_translation_response.get("message", {}).get("content", ""))
-
-                        if not sql_query:
-                            logging.error("Failed to extract a valid SQL query.")
-                            return "No valid SQL query was generated."
-
-                        logging.info(f"Extracted SQL query: {sql_query}")
-
-                        # Step 3: Execute the SQL query using the connection pool
-                        with get_db_connection() as conn:
-                            results = query_db(conn, sql_query)
-                            if results:
-                                # Ingest successful SQL query into the SQL collection
-                                ingest_sql_into_chromadb(sql_query, question, collection_name="sql_collection")
-                                return f"The query returned the following results: {results}"
-                            else:
-                                return "No relevant data found in the PostgreSQL database."
                     else:
-                        return "No relevant spatial documentation found to generate a query."
+                        # If no spatial documentation is found, try to generate the SQL query directly using the LLM
+                        logging.warning("No relevant spatial documentation found. Attempting to generate SQL query using LLM.")
+
+                        # Adjust the prompt for the LLM to generate SQL query directly
+                        sql_translation_prompt = f"Using the following DDL structure: {chromadb_response}, translate this natural language query to PostGIS SQL: {question}"
+
+                    # Submit the SQL query translation prompt
+                    sql_translation_response = submit_prompt(ollama_client, model, sql_translation_prompt, ollama_options, keep_alive)
+
+                    if isinstance(sql_translation_response, str):
+                        sql_translation_response = json.loads(sql_translation_response)
+
+                    sql_query = extract_sql(sql_translation_response.get("message", {}).get("content", ""))
+
+                    if not sql_query:
+                        logging.error("Failed to extract a valid SQL query.")
+                        return "No valid SQL query was generated."
+
+                    logging.info(f"Extracted SQL query: {sql_query}")
+
+                    # Step 3: Execute the SQL query using the connection pool
+                    with get_db_connection() as conn:
+                        results = query_db(conn, sql_query)
+                        if results:
+                            # Ingest successful SQL query into the SQL collection
+                            ingest_sql_into_chromadb(sql_query, question, collection_name="sql_collection")
+                            return f"The query returned the following results: {results}"
+                        else:
+                            return "No relevant data found in the PostgreSQL database."
 
                 # If no 'geom' column is found, continue with standard SQL generation
                 logging.info("No 'geom' column detected. Proceeding with standard SQL generation.")
@@ -544,34 +551,47 @@ def embed_chat_history(chat_history, ollama_client, model):
 def query_chromadb_collection(prompt, collection_name):
     """Query a specific ChromaDB collection using the provided prompt."""
     try:
+        # Step 1: Retrieve or create the collection
         collection = client.get_or_create_collection(name=collection_name, embedding_function=ef)
         if not collection:
             logging.error(f"Collection {collection_name} not found in ChromaDB.")
             return None
 
-        # Generate embedding for the prompt
+        # Step 2: Generate embedding for the prompt
         response = ollama.embeddings(
             prompt=prompt,
             model="bge-m3"
         )
 
-        # Perform the query on the specified ChromaDB collection
+        # Check if the embedding is generated correctly
+        if "embedding" not in response:
+            logging.error("Failed to generate embedding for the prompt.")
+            logging.debug(f"Embedding response: {response}")
+            return None
+
+        embedding = response["embedding"]
+        logging.info(f"Generated embedding for prompt: {embedding[:10]}...")  # Log first 10 values for brevity
+
+        # Step 3: Perform the query on the specified ChromaDB collection
         results = collection.query(
-            query_embeddings=[response["embedding"]],
+            query_embeddings=[embedding],
             n_results=1  # Fetch the most relevant document
         )
 
-        if results['ids']:
-            # Check if documents array is non-empty and well-formed
-            if len(results['documents']) > 0 and len(results['documents'][0]) > 0:
+        # Log full results for debugging
+        logging.debug(f"ChromaDB query results: {results}")
+
+        # Step 4: Check if results contain IDs and documents
+        if "ids" in results and results['ids']:
+            if "documents" in results and len(results['documents']) > 0 and len(results['documents'][0]) > 0:
                 data = results['documents'][0][0]
                 logging.info(f"Retrieved relevant information from {collection_name} collection: {data}")
                 return data
             else:
-                logging.warning(f"Documents array is empty in {collection_name} collection.")
+                logging.warning(f"Documents array is empty in {collection_name} collection. Results: {results}")
                 return None
         else:
-            logging.warning(f"No matching document found in {collection_name}.")
+            logging.warning(f"No matching document found in {collection_name}. Results: {results}")
             return None
 
     except json.JSONDecodeError as e:
@@ -580,7 +600,6 @@ def query_chromadb_collection(prompt, collection_name):
     except Exception as e:
         logging.error(f"Error querying {collection_name} collection: {e}")
         return None
-
 
 def apply_schema_to_sql(conn, sql_query):
     """Apply detected schemas to the table names in the SQL query."""
@@ -746,18 +765,32 @@ def submit_prompt(ollama_client, model, prompt, ollama_options, keep_alive=None)
         return f"An error occurred: {str(e)}"
 
 def get_table_ddl(conn, table_name):
-    """Get the DDL of a table."""
+    """Get the DDL of a table, including handling USER-DEFINED types like PostGIS geometry."""
     try:
         with conn.cursor() as cursor:
+            # Fetch column names and data types from the information_schema
             cursor.execute(f"""
-                SELECT column_name, data_type
+                SELECT column_name, data_type, udt_name
                 FROM information_schema.columns
                 WHERE table_name = '{table_name}';
             """)
             columns = cursor.fetchall()
+
             ddl = f"CREATE TABLE IF NOT EXISTS {table_name} (\n"
-            ddl += ",\n".join([f"    {col[0]} {col[1]}" for col in columns])
+            column_definitions = []
+
+            for column in columns:
+                column_name, data_type, udt_name = column
+
+                # Check if the type is USER-DEFINED, and if so, use the actual type from pg_type
+                if data_type == 'USER-DEFINED':
+                    data_type = udt_name  # Use the user-defined type from udt_name
+
+                column_definitions.append(f"    {column_name} {data_type}")
+
+            ddl += ",\n".join(column_definitions)
             ddl += "\n);"
+            
             logging.info(f"Fetched DDL for table {table_name}.")
             return ddl
     except psycopg2.Error as e:
