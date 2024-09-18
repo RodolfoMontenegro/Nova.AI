@@ -9,3 +9,7 @@ retrying
 Flask
 spacy
 langdetect
+pdf2image
+pillow
+pytesseract
+psutil
