@@ -13,3 +13,4 @@ pdf2image
 pillow
 pytesseract
 psutil
+PyPDF2
