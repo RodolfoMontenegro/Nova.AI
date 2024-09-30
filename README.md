@@ -29,6 +29,13 @@ Nova.AI is a Python-based application designed to translate natural language int
     ```bash
     pip install -r requirements.txt
     apt-get install poppler-utils
+    sudo apt install tesseract-ocr
+    sudo apt install libtesseract-dev
+
+    import pytesseract
+    pytesseract.pytesseract.tesseract_cmd = r'/usr/share/tesseract-ocr'
+    /usr/share/tesseract-ocr
+    
     python -m spacy download en_core_web_sm
     python -m spacy download es_core_news_sm
     ```
