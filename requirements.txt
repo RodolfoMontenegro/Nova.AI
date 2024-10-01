@@ -14,3 +14,4 @@ pillow
 pytesseract
 psutil
 PyPDF2
+beautifulsoup4
