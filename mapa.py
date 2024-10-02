@@ -288,7 +288,7 @@ def chat_with_bot(question):
     try:
         # Step 1: Configure and initialize the Ollama client
         ollama_config = {
-            "model": "llama3.1",
+            "model": "llama3.2",
             "ollama_host": "http://localhost:11434"
         }
         ollama_client, model, ollama_options, keep_alive = init_ollama(ollama_config)
@@ -349,7 +349,7 @@ def chat_with_bot(question):
                         results = query_db(conn, sql_query)
                         if results:
                             # Ingest successful SQL query into the SQL collection
-                            ingest_sql_into_chromadb(sql_query, question, collection_name="sql_collection")
+                            ingest_sql_into_chromadb(sql_query, question)
                             return f"The query returned the following results: {results}"
                         else:
                             return "No relevant data found in the PostgreSQL database."
@@ -375,7 +375,7 @@ def chat_with_bot(question):
                     results = query_db(conn, sql_query)
                     if results:
                         # Ingest successful SQL query into the SQL collection
-                        ingest_sql_into_chromadb(sql_query, question, collection_name="sql_collection")
+                        ingest_sql_into_chromadb(sql_query, question)
                         return f"The query returned the following results: {results}"
                     else:
                         return "No relevant data found in the PostgreSQL database."
@@ -405,7 +405,7 @@ def chat_with_bot(question):
                 results = query_db(conn, sql_query)
                 if results:
                     # Ingest successful SQL query into the SQL collection
-                    ingest_sql_into_chromadb(sql_query, question, collection_name="sql_collection")
+                    ingest_sql_into_chromadb(sql_query, question)
                     return f"The query returned the following results: {results}"
                 else:
                     return "No relevant data found in the PostgreSQL database."
@@ -826,52 +826,65 @@ def verify_sql_query(query):
     logging.info("Skipping SQL query validation for debugging.")
     return True
 
-def ingest_sql_into_chromadb(sql_query, question, collection_name="sql_collection"):
-    """Ingest a successful SQL query into the specified ChromaDB collection."""
-    global client, ef  # Ensure global client and embedding function are accessible
+def ingest_sql_into_chromadb(sql_query, question, metadata=None):
+    """Embed the SQL queries using Ollama embeddings and store them in the ChromaDB SQL collection."""
+    global client, ef, sql_collection  # Use sql_collection instead of dynamically passing collection_name
 
     try:
         # Ensure client and embedding function are initialized
-        if not client or not ef:
-            logging.error("ChromaDB client or embedding function is not initialized.")
+        if not client or not sql_collection:
+            logging.error("ChromaDB client or sql_collection is not initialized.")
             return
 
-        # Generate a unique document ID based on the SQL query or question
+        # Generate a unique document ID based on the SQL query
         doc_id = hashlib.md5(sql_query.encode('utf-8')).hexdigest()
 
-        # Get or create the specified collection by name
-        collection = client.get_or_create_collection(name=collection_name, embedding_function=ef)
-
         # Check if the document with the same ID already exists in the collection
-        existing = collection.get(ids=[doc_id])
+        existing = sql_collection.get(ids=[doc_id])
         if existing and existing['ids']:
-            logging.warning(f"SQL query with ID {doc_id} already exists in {collection_name}. Skipping ingestion.")
+            logging.warning(f"SQL query with ID {doc_id} already exists in sql_collection. Skipping ingestion.")
             return
 
-        # Generate embedding for the SQL query and the question using Ollama
-        response = ollama.embeddings(
-            model="bge-m3",  # Ensure the embedding model matches your setup
-            prompt=f"SQL Query: {sql_query}\nQuestion: {question}"
-        )
+        # Combine SQL query and question into a plain text prompt for embedding
+        prompt = f"The SQL query is: {sql_query}. The related question is: {question}."
 
-        # Extract the embedding vector from the response
-        embedding = response.get("embedding")
-        if embedding:
-            # Ingest the SQL query, question, and embedding into the specified collection
-            collection.add(
-                ids=[doc_id],
-                embeddings=[embedding],
-                documents=[json.dumps({
-					"sql": sql_query,
-					"question": question
-				})] # Store both the SQL query and the question as the document
-            )
-            logging.info(f"SQL query successfully ingested into ChromaDB '{collection_name}' collection.")
+        # Use the embedding API to generate the embedding
+        response = ollama.embed(model="bge-m3", input=prompt)
+
+        # Log the entire response to inspect its structure
+        logging.info(f"Embedding response from Ollama: {response}")
+
+        # Extract the first embedding from the response (if available)
+        embeddings = response.get("embeddings")
+        if embeddings and isinstance(embeddings, list) and len(embeddings) > 0:
+            embedding = embeddings[0]  # Extract the first embedding array
+
+            if isinstance(embedding, list) and all(isinstance(i, float) for i in embedding):
+                # Add more structured metadata, including UUIDs or any additional information
+                metadata_to_store = metadata or {}
+                metadata_to_store["uuid"] = str(uuid.uuid4())  # Add a unique UUID for each SQL document
+                metadata_to_store["sql_query"] = sql_query
+                metadata_to_store["question"] = question
+
+                # Ingest the SQL query, embedding, and metadata into ChromaDB
+                sql_collection.add(
+                    ids=[doc_id],
+                    embeddings=[embedding],
+                    documents=[json.dumps({"sql": sql_query, "question": question})],
+                    metadatas=[metadata_to_store]
+                )
+                logging.info(f"SQL query successfully ingested into ChromaDB 'sql_collection' with ID: {doc_id}")
+
+                # Immediately retrieve and log the added document to ensure it was stored properly
+                added_data = sql_collection.get(ids=[doc_id])
+                logging.info(f"Added document to 'sql_collection': {added_data}")
+            else:
+                logging.error(f"Invalid embedding format. Expected a list of floating-point values, got: {embedding}")
         else:
-            logging.error(f"Invalid embedding format. Expected a list of floating-point values.")
+            logging.error("Embedding data is missing or invalid in the response.")
 
     except Exception as e:
-        logging.error(f"Error ingesting SQL query into ChromaDB {collection_name}: {e}")
+        logging.error(f"Error ingesting SQL query into ChromaDB: {e}")
 
 def extract_content_from_url(url, extraction_rules):
     """Extracts content from a given URL based on the specified extraction rules."""
