@@ -37,12 +37,12 @@ import requests
 import langdetect
 import difflib
 import spacy
+import uuid
 import pandas as pd
 from httpx import Timeout, ConnectTimeout, HTTPStatusError
 from chromadb.utils.embedding_functions import OllamaEmbeddingFunction
 from flask import Flask, request, jsonify, render_template, url_for, redirect, flash, session
 from logging.config import dictConfig
-from langdetect import detect
 from psycopg2.pool import SimpleConnectionPool
 from psycopg2.extras import RealDictCursor
 from tenacity import retry, stop_after_attempt, wait_fixed
@@ -232,6 +232,33 @@ def init_chromadb():
 # Initialize ChromaDB at application startup
 init_chromadb()
 
+# Initialize the Ollama client
+def init_ollama(config):
+    try:
+        ollama = __import__("ollama")
+    except ImportError:
+        raise DependencyError(
+            "You need to install required dependencies to execute this method, run command:"
+            " \npip install ollama"
+        )
+
+    host = config.get("ollama_host", "http://localhost:11434")
+    model = config["model"]
+    if ":" not in model:
+        model += ":latest"
+
+    ollama_client = ollama.Client(host, timeout=Timeout(240.0))
+    keep_alive = config.get('keep_alive', None)
+    ollama_options = config.get('options', {})
+
+    # Ensure model is available
+    model_list_response = ollama_client.list()
+    model_list = [model_element['model'] for model_element in model_list_response.get('models', [])]
+    if model not in model_list:
+        ollama_client.pull(model)
+
+    return ollama_client, model, ollama_options, keep_alive
+	
 def extract_sql(llm_response):
     if not isinstance(llm_response, str):
         raise ValueError("The LLM response should be a string")
@@ -253,34 +280,70 @@ def generate_ddl_id(ddl):
     """Generate a unique ID for a DDL based on its content."""
     return hashlib.md5(ddl.encode('utf-8')).hexdigest()
 
-def embed_ddl(ddls):
-    """Embed the DDLs using Ollama embeddings and store them in ChromaDB."""
-    global client, ef, ddl_collection  # Use ddl_collection instead of collection
+def embed_ddl(ddls, table_name, conn):
+    """Embed the DDLs using Ollama embeddings and store them in ChromaDB with metadata."""
+    global client, ddl_collection
 
     try:
         if not client or not ddl_collection:
             logging.error("ChromaDB client or ddl_collection is not initialized.")
             raise RuntimeError("ChromaDB client or ddl_collection is not initialized.")
 
-        for ddl in ddls:
+        # Initialize the Ollama client using your existing config
+        ollama_client, model, ollama_options, keep_alive = init_ollama({
+            "model": "bge-m3",
+            "ollama_host": "http://localhost:11434"
+        })
+
+        for ddl_data in ddls:
+            ddl, srid_info = ddl_data  # Unpack the DDL and SRID data
+
+            if isinstance(ddl, tuple):
+                ddl = ddl[0]  # Extract the DDL string if it's inside a tuple
+
+            if not table_name:
+                logging.warning(f"Table name could not be extracted from DDL: {ddl}")
+                continue
+
+            # Generate a unique ID for the DDL
             ddl_id = generate_ddl_id(ddl)
+
+            # Check if the DDL is already embedded in ChromaDB
             existing = ddl_collection.get(ids=[ddl_id])
             if existing['ids']:
                 logging.warning(f"Embedding with ID {ddl_id} already exists. Skipping...")
                 continue
 
-            response = ollama.embeddings(model="bge-m3", prompt=ddl)
-            embedding = response["embedding"]
+            # Use the Ollama client to generate embeddings
+            response = ollama_client.embed(
+                model="bge-m3",  # Use the correct model for embeddings
+                input=ddl  # Pass the DDL statement to generate embeddings
+            )
+            embedding = response["embeddings"][0]  # Extract the first embedding
+
+            # Prepare metadata ensuring no NoneType is passed
+            metadata = {
+                "table_name": table_name,
+                "srid": str(srid_info.get("srid", "unknown"))  # Handle None by converting to a string
+            }
+
+            # Add the embedding, DDL, and metadata to ChromaDB
             ddl_collection.add(
                 ids=[ddl_id],
                 embeddings=[embedding],
-                documents=[ddl]
+                documents=[ddl],
+                metadatas=[metadata]
             )
-        logging.info("DDLs embedded and stored in ChromaDB.")
+
+        logging.info("DDLs embedded and stored in ChromaDB with metadata.")
+
     except ConnectTimeout:
         logging.error("Connection timeout while embedding DDLs.")
     except HTTPStatusError as e:
         logging.error(f"HTTP error while embedding DDLs: {e}")
+    except psycopg2.Error as e:
+        logging.error(f"Database error while embedding DDLs: {e}")
+        conn.rollback()  # Rollback any transaction if applicable
     except Exception as e:
         logging.error(f"Error embedding DDLs: {e}")
 
@@ -307,16 +370,27 @@ def chat_with_bot(question):
             logging.info("Bot decided to query ChromaDB.")
 
             # Query ChromaDB (ddl_collection as default)
-            chromadb_response = query_chromadb(question, collection_name="ddl_collection")
+            chromadb_response = query_chromadb(question)
             if chromadb_response:
                 logging.info(f"Retrieved DDL structure from ChromaDB: {chromadb_response}")
 
+                # Flatten chromadb_response to handle nested lists
+                flattened_ddl = []
+                for item in chromadb_response:
+                    if isinstance(item, list):
+                        flattened_ddl.extend(item)  # If item is a list, extend the flattened_ddl list
+                    else:
+                        flattened_ddl.append(item)  # If item is a string, append it directly
+
+                # Join the flattened list into a single string
+                combined_ddl = " ".join(flattened_ddl).lower()
+
                 # Check if the DDL structure contains a 'geom' column for spatial data
-                if 'geom' in chromadb_response.lower():
+                if 'geom' in combined_ddl:
                     logging.info("Detected 'geom' column in DDL. Routing to spatial query logic.")
 
-                    # Attempt to retrieve relevant spatial documentation from ChromaDB to generate a PostGIS SQL query
-                    spatial_docs_response = query_chromadb_collection(question, collection_name="documentation_collection")
+                    # Attempt to retrieve relevant spatial documentation from ChromaDB
+                    spatial_docs_response = query_chromadb(question, table_name="documentation_collection")
 
                     if spatial_docs_response:
                         logging.info(f"Retrieved relevant spatial documentation: {spatial_docs_response}")
@@ -328,7 +402,7 @@ def chat_with_bot(question):
                         logging.warning("No relevant spatial documentation found. Attempting to generate SQL query using LLM.")
 
                         # Adjust the prompt for the LLM to generate SQL query directly
-                        sql_translation_prompt = f"Using the following DDL structure: {chromadb_response}, translate this natural language query to PostGIS SQL: {question}"
+                        sql_translation_prompt = f"Using the following DDL structure: {combined_ddl}, translate this natural language query to PostGIS SQL: {question}"
 
                     # Submit the SQL query translation prompt
                     sql_translation_response = submit_prompt(ollama_client, model, sql_translation_prompt, ollama_options, keep_alive)
@@ -350,13 +424,13 @@ def chat_with_bot(question):
                         if results:
                             # Ingest successful SQL query into the SQL collection
                             ingest_sql_into_chromadb(sql_query, question)
-                            return f"The query returned the following results: {results}"
+                            return pd.DataFrame(results).to_dict(orient='records')
                         else:
                             return "No relevant data found in the PostgreSQL database."
 
                 # If no 'geom' column is found, continue with standard SQL generation
                 logging.info("No 'geom' column detected. Proceeding with standard SQL generation.")
-                sql_translation_prompt = f"Using the following DDL structure: {chromadb_response}, translate this natural language query to SQL: {question}"
+                sql_translation_prompt = f"Using the following DDL structure: {combined_ddl}, translate this natural language query to SQL: {question}"
                 sql_translation_response = submit_prompt(ollama_client, model, sql_translation_prompt, ollama_options, keep_alive)
 
                 if isinstance(sql_translation_response, str):
@@ -376,7 +450,7 @@ def chat_with_bot(question):
                     if results:
                         # Ingest successful SQL query into the SQL collection
                         ingest_sql_into_chromadb(sql_query, question)
-                        return f"The query returned the following results: {results}"
+                        return pd.DataFrame(results).to_dict(orient='records')
                     else:
                         return "No relevant data found in the PostgreSQL database."
             else:
@@ -406,7 +480,7 @@ def chat_with_bot(question):
                 if results:
                     # Ingest successful SQL query into the SQL collection
                     ingest_sql_into_chromadb(sql_query, question)
-                    return f"The query returned the following results: {results}"
+                    return pd.DataFrame(results).to_dict(orient='records')
                 else:
                     return "No relevant data found in the PostgreSQL database."
 
@@ -651,69 +725,55 @@ def query_db(conn, query, params=None):
         logging.error(f"Error executing query: {e}")
         return None
 
-def query_chromadb(prompt, collection_name="ddl_collection"):
-    """Query the specified ChromaDB collection using the prompt."""
-    global client, ef  # Ensure global client and embedding function are accessible
+def query_chromadb(prompt, table_name=None, srid=None):
+    """Query the global ddl_collection using the prompt, with optional table name and SRID filters."""
+    global client, ddl_collection  # Ensure the global client and ddl_collection are used
 
     try:
-        if not client:
-            raise RuntimeError("ChromaDB client is not initialized.")
-        
-        # Fetch the specified collection by name
-        collection = client.get_collection(name=collection_name, embedding_function=ef)
-        if not collection:
-            raise RuntimeError(f"ChromaDB collection '{collection_name}' is not initialized.")
+        if not client or not ddl_collection:
+            raise RuntimeError("ChromaDB client or ddl_collection is not initialized.")
 
-        # Generate embedding for the prompt
-        response = ollama.embeddings(
-            prompt=prompt,
-            model="bge-m3"
-        )
+        # Initialize the Ollama client using your existing config
+        ollama_client, model, ollama_options, keep_alive = init_ollama({
+            "model": "bge-m3",
+            "ollama_host": "http://localhost:11434"
+        })
 
-        # Perform the query on the specified ChromaDB collection
-        results = collection.query(
-            query_embeddings=[response["embedding"]],
-            n_results=1  # Fetch the most relevant document
+        # Generate embedding for the prompt (natural language query) using the Ollama client
+        response = ollama_client.embed(
+            model="bge-m3",  # Use the model suited for embeddings
+            input=prompt  # The user's query for embedding
         )
+        embedding = response["embeddings"][0]  # Extract the embedding from the response
+
+        # Prepare query arguments for ChromaDB
+        query_kwargs = {
+            "query_embeddings": [embedding],  # Use embedding generated from the prompt
+            "n_results": 5  # Fetch the most relevant documents (adjust if needed)
+        }
+
+        # Apply optional filters for table_name and SRID
+        if table_name or srid:
+            query_kwargs["where"] = {}
+            if table_name:
+                query_kwargs["where"]["table_name"] = table_name
+            if srid:
+                query_kwargs["where"]["srid"] = srid
+
+        # Execute the query on the ddl_collection
+        results = ddl_collection.query(**query_kwargs)
 
         if results['ids']:
-            data = results['documents'][0][0]
-            logging.info(f"Retrieved data from {collection_name}: {data}")
-            return data
+            # Process and return the retrieved documents
+            retrieved_data = [doc for doc in results['documents']]  # Return only documents
+            return retrieved_data  # Return list of relevant documents
         else:
-            logging.warning(f"No matching document found in {collection_name}.")
-            return None
+            logging.warning(f"No matching document found in ddl_collection.")
+            return []  # Return an empty list if no documents found
 
     except Exception as e:
-        logging.error(f"Error querying {collection_name} collection: {e}")
-        return f"Error occurred while querying {collection_name}: {e}"
-
-# Initialize the Ollama client
-def init_ollama(config):
-    try:
-        ollama = __import__("ollama")
-    except ImportError:
-        raise DependencyError(
-            "You need to install required dependencies to execute this method, run command:"
-            " \npip install ollama"
-        )
-
-    host = config.get("ollama_host", "http://localhost:11434")
-    model = config["model"]
-    if ":" not in model:
-        model += ":latest"
-
-    ollama_client = ollama.Client(host, timeout=Timeout(240.0))
-    keep_alive = config.get('keep_alive', None)
-    ollama_options = config.get('options', {})
-
-    # Ensure model is available
-    model_list_response = ollama_client.list()
-    model_list = [model_element['model'] for model_element in model_list_response.get('models', [])]
-    if model not in model_list:
-        ollama_client.pull(model)
-
-    return ollama_client, model, ollama_options, keep_alive
+        logging.error(f"Error querying ddl_collection: {e}")
+        return []
 
 # Function to submit prompt to Ollama
 def submit_prompt(ollama_client, model, prompt, ollama_options, keep_alive=None):
@@ -765,40 +825,50 @@ def submit_prompt(ollama_client, model, prompt, ollama_options, keep_alive=None)
         return f"An error occurred: {str(e)}"
 
 def get_table_ddl(conn, table_name):
-    """Get the DDL of a table, including handling USER-DEFINED types like PostGIS geometry."""
+    """Get the DDL of a table and fetch the SRID for any PostGIS geometry columns."""
     try:
         with conn.cursor() as cursor:
-            # Fetch column names and data types from the information_schema
+            # Fetch column names, data types, user-defined types, and SRID for geometry columns
             cursor.execute(f"""
-                SELECT column_name, data_type, udt_name
-                FROM information_schema.columns
-                WHERE table_name = '{table_name}';
+                SELECT c.column_name, c.data_type, c.udt_name, 
+                       COALESCE(gc.srid, NULL) AS srid  -- Get SRID if geometry, otherwise NULL
+                FROM information_schema.columns c
+                LEFT JOIN public.geometry_columns gc
+                ON c.table_name = gc.f_table_name AND c.column_name = gc.f_geometry_column
+                WHERE c.table_name = '{table_name}';
             """)
             columns = cursor.fetchall()
 
             ddl = f"CREATE TABLE IF NOT EXISTS {table_name} (\n"
             column_definitions = []
 
+            srid_info = {}  # Dictionary to store SRID for geometry columns
+
             for column in columns:
-                column_name, data_type, udt_name = column
+                column_name, data_type, udt_name, srid = column  # Expect 4 values
 
-                # Check if the type is USER-DEFINED, and if so, use the actual type from pg_type
                 if data_type == 'USER-DEFINED':
-                    data_type = udt_name  # Use the user-defined type from udt_name
+                    data_type = udt_name  # Use user-defined type for geometry
 
-                column_definitions.append(f"    {column_name} {data_type}")
+                if srid is not None:
+                    # Handle geometry columns with SRID
+                    column_definitions.append(f"    {column_name} {data_type} (SRID: {srid})")
+                    srid_info[column_name] = srid  # Store SRID for the column
+                else:
+                    column_definitions.append(f"    {column_name} {data_type}")
 
             ddl += ",\n".join(column_definitions)
             ddl += "\n);"
-            
-            logging.info(f"Fetched DDL for table {table_name}.")
-            return ddl
+
+            logging.info(f"Fetched DDL for table {table_name}, including SRID information.")
+            return ddl, srid_info  # Return DDL and SRID dictionary
+
     except psycopg2.Error as e:
         logging.error(f"Database error fetching DDL: {e}")
-        return None
+        return None, {}
     except Exception as e:
         logging.error(f"Error fetching DDL: {e}")
-        return None
+        return None, {}
 
 def detect_schema_for_table(conn, table_name):
     """Detect the schema where the table exists."""
@@ -825,6 +895,10 @@ def verify_sql_query(query):
     """Temporarily bypass SQL validation for debugging purposes."""
     logging.info("Skipping SQL query validation for debugging.")
     return True
+
+def deterministic_uuid(content: str) -> str:
+    """Generate a deterministic UUID based on the content."""
+    return str(uuid.UUID(hashlib.md5(content.encode('utf-8')).hexdigest()))
 
 def ingest_sql_into_chromadb(sql_query, question, metadata=None):
     """Embed the SQL queries using Ollama embeddings and store them in the ChromaDB SQL collection."""
@@ -1002,21 +1076,21 @@ def get_training_data() -> pd.DataFrame:
             collection = client.get_collection(collection_name)
             data = collection.get()
 
+            logging.info(f"Data retrieved from {collection_name}: {data}")  # Check what was retrieved
+
             # Check if the collection has the expected keys: "documents" and "ids"
             if data and "documents" in data and "ids" in data:
-                # Handle SQL collection differently as it might have JSON-encoded documents
-                if training_data_type == "sql":
-                    documents = [json.loads(doc) if training_data_type == "sql" else doc for doc in data["documents"]]
-                else:
-                    documents = []
-                    for doc in data["documents"]:
-                        try:
-                            if training_data_type == "sql":
-                                documents.append(json.loads(doc))
-                            else:
-                                documents.append(doc)
-                        except json.JSONDecodeError:
-                            logging.error(f"Failed to parse document in {collection_name}: {doc}")
+                documents = []
+                for doc in data["documents"]:
+                    try:
+                        # Attempt to decode JSON-encoded SQL documents
+                        if training_data_type == "sql":
+                            decoded_doc = json.loads(doc) if isinstance(doc, str) else doc
+                            documents.append(decoded_doc)
+                        else:
+                            documents.append(doc)
+                    except json.JSONDecodeError as e:
+                        logging.error(f"Failed to parse document in {collection_name}: {doc}. Error: {e}")
 
                 # Prepare the DataFrame for each collection
                 df = pd.DataFrame({
@@ -1058,7 +1132,7 @@ def remove_training_data(id: str) -> bool:
         if id.endswith(suffix):
             client.get_collection(collection_name).delete(ids=id)
             return True
-    
+
     return False
 
 def remove_collection(collection_name: str) -> bool:
@@ -1086,11 +1160,14 @@ def main():
                 all_ddls = []
                 for table in tables:
                     table_name = table[0]
-                    ddl = get_table_ddl(conn, table_name)
+                    ddl, srid_info = get_table_ddl(conn, table_name)
                     if ddl:
-                        all_ddls.append(ddl)
+                        all_ddls.append((ddl, srid_info))  # Store the DDL and SRID info as a tuple
+
                 if all_ddls:
-                    embed_ddl(all_ddls)
+                    # Pass table_name and conn with each call
+                    for ddl_data in all_ddls:
+                        embed_ddl([ddl_data], table_name, conn)  # Pass the DDLs, table_name, and conn
     except Exception as e:
         logging.error(f"Error in main function: {e}")
     finally:
@@ -1127,17 +1204,25 @@ def get_all_ddls():
             all_ddls = []
             for table in tables:
                 table_name = table[0]
-                ddl = get_table_ddl(conn, table_name)
+                ddl, srid_info = get_table_ddl(conn, table_name)
                 if ddl:
-                    all_ddls.append(ddl)
+                    all_ddls.append((ddl, srid_info))  # Include SRID info
 
             # Step 4: Embed the DDLs into ChromaDB if there are any
             if all_ddls:
-                embed_ddl(all_ddls)
+                # Pass table_name and conn for each DDL
+                for ddl_data in all_ddls:
+                    embed_ddl([ddl_data], table_name, conn)
 
             # Step 5: Render the DDLs in the 'ddl.html' template
             return render_template('ddl.html', ddls=all_ddls)
 
+    except psycopg2.Error as e:
+        # Rollback transaction on error and log the issue
+        if conn:
+            conn.rollback()
+        logging.error(f"Database error fetching DDLs: {e}")
+        return render_template('error.html', message="Error fetching DDLs"), 500
     except Exception as e:
         # Log any errors and return an error page
         logging.error(f"Error fetching DDLs: {e}")
@@ -1151,7 +1236,6 @@ def show_query_form():
 def query_database():
     data = request.form
     query = data.get('query')
-    question = data.get('question')  # New input for natural language question
 
     if query:
         try:
@@ -1161,16 +1245,19 @@ def query_database():
                 with get_db_connection() as conn:
                     results = query_db(conn, query)
                     if results:
-                        return render_template('query.html', results=results)
+                        df = pd.DataFrame(results)
+                        return render_template('query.html', results=df.to_html(classes='table table-bordered', index=False))
                     else:
                         return render_template('query.html', error="No results found.")
             else:
                 # Assume it's a question for the bot
                 bot_response = chat_with_bot(query)
-                return render_template('query.html', bot_response=bot_response)
-        except psycopg2.OperationalError as e:
-            logging.error(f"Database operational error: {e}")
-            return render_template('query.html', error="Database connection failed.")
+                if isinstance(bot_response, list) and bot_response:
+                    # If the bot returns a list of dictionaries as the response
+                    df = pd.DataFrame(bot_response)
+                    return render_template('query.html', results=df.to_html(classes='table table-bordered', index=False))
+                else:
+                    return render_template('query.html', bot_response=bot_response)
         except Exception as e:
             logging.error(f"Error executing query: {e}")
             return render_template('query.html', error="An unexpected error occurred.")
