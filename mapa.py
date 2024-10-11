@@ -356,7 +356,41 @@ def chat_with_bot(question):
         }
         ollama_client, model, ollama_options, keep_alive = init_ollama(ollama_config)
 
-        # Step 2: Analyze the question and decide which database to query
+        # Step 2: Query the SQL collection first to check for similar questions
+        logging.info("Querying SQL collection in ChromaDB for similar questions.")
+        sql_match = query_chromadb_collection(prompt=question, collection_name="sql")
+
+        # If a match is found in the SQL collection, use the stored SQL query
+        if sql_match:
+            logging.info(f"Found a matching SQL query in the SQL collection: {sql_match}")
+
+            # Extract the 'sql' field from the result JSON
+            try:
+                sql_query = json.loads(sql_match).get("sql")
+            except json.JSONDecodeError as e:
+                logging.error(f"Error decoding SQL match result: {e}")
+                return "Failed to decode SQL query from matched result."
+
+            if sql_query:
+                logging.info(f"Executing the matched SQL query: {sql_query}")
+
+                # Execute the SQL query using the connection pool
+                with get_db_connection() as conn:
+                    results = query_db(conn, sql_query)
+                    if results:
+                        logging.info("Returning query results from PostgreSQL.")
+                        return pd.DataFrame(results).to_dict(orient='records')
+                    else:
+                        logging.warning("No relevant data found in the PostgreSQL database.")
+                        return "No relevant data found in the PostgreSQL database."
+            else:
+                logging.error("Failed to extract a valid SQL query from the matched document.")
+                return "No valid SQL query was found in the matched document."
+
+        # If no match is found, proceed with the regular process of deciding the database
+        logging.info("No match found in SQL collection. Proceeding to analyze the question and decide the database.")
+
+        # Analyze the question and decide which database to query
         decision_prompt = f"Analyze the question and decide if it should query the PostgreSQL database or ChromaDB: {question}"
         decision_response = submit_prompt(ollama_client, model, decision_prompt, ollama_options, keep_alive)
 
@@ -378,33 +412,25 @@ def chat_with_bot(question):
                 flattened_ddl = []
                 for item in chromadb_response:
                     if isinstance(item, list):
-                        flattened_ddl.extend(item)  # If item is a list, extend the flattened_ddl list
+                        flattened_ddl.extend(item)
                     else:
-                        flattened_ddl.append(item)  # If item is a string, append it directly
+                        flattened_ddl.append(item)
 
-                # Join the flattened list into a single string
                 combined_ddl = " ".join(flattened_ddl).lower()
 
-                # Check if the DDL structure contains a 'geom' column for spatial data
                 if 'geom' in combined_ddl:
                     logging.info("Detected 'geom' column in DDL. Routing to spatial query logic.")
 
-                    # Attempt to retrieve relevant spatial documentation from ChromaDB
                     spatial_docs_response = query_chromadb(question, table_name="documentation_collection")
 
                     if spatial_docs_response:
                         logging.info(f"Retrieved relevant spatial documentation: {spatial_docs_response}")
 
-                        # Generate SQL query using the retrieved documentation
                         sql_translation_prompt = f"Using the following PostGIS documentation: {spatial_docs_response}, translate this natural language query to a PostGIS SQL query: {question}"
                     else:
-                        # If no spatial documentation is found, try to generate the SQL query directly using the LLM
                         logging.warning("No relevant spatial documentation found. Attempting to generate SQL query using LLM.")
-
-                        # Adjust the prompt for the LLM to generate SQL query directly
                         sql_translation_prompt = f"Using the following DDL structure: {combined_ddl}, translate this natural language query to PostGIS SQL: {question}"
 
-                    # Submit the SQL query translation prompt
                     sql_translation_response = submit_prompt(ollama_client, model, sql_translation_prompt, ollama_options, keep_alive)
 
                     if isinstance(sql_translation_response, str):
@@ -418,17 +444,14 @@ def chat_with_bot(question):
 
                     logging.info(f"Extracted SQL query: {sql_query}")
 
-                    # Step 3: Execute the SQL query using the connection pool
                     with get_db_connection() as conn:
                         results = query_db(conn, sql_query)
                         if results:
-                            # Ingest successful SQL query into the SQL collection
                             ingest_sql_into_chromadb(sql_query, question)
                             return pd.DataFrame(results).to_dict(orient='records')
                         else:
                             return "No relevant data found in the PostgreSQL database."
 
-                # If no 'geom' column is found, continue with standard SQL generation
                 logging.info("No 'geom' column detected. Proceeding with standard SQL generation.")
                 sql_translation_prompt = f"Using the following DDL structure: {combined_ddl}, translate this natural language query to SQL: {question}"
                 sql_translation_response = submit_prompt(ollama_client, model, sql_translation_prompt, ollama_options, keep_alive)
@@ -444,22 +467,20 @@ def chat_with_bot(question):
 
                 logging.info(f"Extracted SQL query: {sql_query}")
 
-                # Step 3: Execute the SQL query using the connection pool
                 with get_db_connection() as conn:
                     results = query_db(conn, sql_query)
                     if results:
-                        # Ingest successful SQL query into the SQL collection
                         ingest_sql_into_chromadb(sql_query, question)
                         return pd.DataFrame(results).to_dict(orient='records')
                     else:
                         return "No relevant data found in the PostgreSQL database."
+
             else:
                 return "No relevant information found in ChromaDB."
 
         elif "postgresql" in decision_content or "sql" in decision_content:
             logging.info("Bot decided to query the PostgreSQL database.")
 
-            # Generate and execute SQL directly
             sql_translation_prompt = f"Translate this natural language query to SQL: {question}"
             sql_translation_response = submit_prompt(ollama_client, model, sql_translation_prompt, ollama_options, keep_alive)
 
@@ -474,11 +495,9 @@ def chat_with_bot(question):
 
             logging.info(f"Extracted SQL query: {sql_query}")
 
-            # Execute the SQL query using the connection pool
             with get_db_connection() as conn:
                 results = query_db(conn, sql_query)
                 if results:
-                    # Ingest successful SQL query into the SQL collection
                     ingest_sql_into_chromadb(sql_query, question)
                     return pd.DataFrame(results).to_dict(orient='records')
                 else:
