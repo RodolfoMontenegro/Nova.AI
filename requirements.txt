@@ -15,3 +15,4 @@ pytesseract
 psutil
 PyPDF2
 beautifulsoup4
+aiohttp
