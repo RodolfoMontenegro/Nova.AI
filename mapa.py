@@ -346,7 +346,7 @@ def embed_ddl(ddls, table_name, conn):
         conn.rollback()  # Rollback any transaction if applicable
     except Exception as e:
         logging.error(f"Error embedding DDLs: {e}")
-
+		
 def chat_with_bot(question):
     try:
         # Step 1: Configure and initialize the Ollama client
@@ -356,156 +356,137 @@ def chat_with_bot(question):
         }
         ollama_client, model, ollama_options, keep_alive = init_ollama(ollama_config)
 
-        # Step 2: Query the SQL collection first to check for similar questions
+        # Step 2: Query the SQL collection to check for similar questions
         logging.info("Querying SQL collection in ChromaDB for similar questions.")
-        sql_match = query_chromadb_collection(prompt=question, collection_name="sql")
+        sql_match = query_chromadb_collection(prompt=question, collection_name="sql", similarity_threshold=0.85)
 
-        # If a match is found in the SQL collection, use the stored SQL query
-        if sql_match:
-            logging.info(f"Found a matching SQL query in the SQL collection: {sql_match}")
+        if sql_match and "documents" in sql_match and len(sql_match["documents"]) > 0:
+            matched_sql = sql_match["documents"][0][0]
+            similarity_score = sql_match["distances"][0][0]
 
-            # Extract the 'sql' field from the result JSON
-            try:
-                sql_query = json.loads(sql_match).get("sql")
-            except json.JSONDecodeError as e:
-                logging.error(f"Error decoding SQL match result: {e}")
-                return "Failed to decode SQL query from matched result."
+            logging.info(f"Found a matching SQL query with similarity score {similarity_score}: {matched_sql}")
 
-            if sql_query:
-                logging.info(f"Executing the matched SQL query: {sql_query}")
+            if similarity_score > 0.85:
+                logging.info(f"SQL query {matched_sql} has an acceptable similarity score. Proceeding with LLM verification.")
+                verification_prompt = (
+                    f"The user asked: {question}.\n"
+                    f"The retrieved SQL query is: {matched_sql}.\n"
+                    "Does the SQL query accurately and fully answer the user's question? "
+                    "If not, please explain why and indicate how it might be incorrect. Please respond with 'yes' or 'no'."
+                )
+                verification_response = submit_prompt(ollama_client, model, verification_prompt, ollama_options, keep_alive)
 
-                # Execute the SQL query using the connection pool
-                with get_db_connection() as conn:
-                    results = query_db(conn, sql_query)
-                    if results:
-                        logging.info("Returning query results from PostgreSQL.")
-                        return pd.DataFrame(results).to_dict(orient='records')
-                    else:
-                        logging.warning("No relevant data found in the PostgreSQL database.")
-                        return "No relevant data found in the PostgreSQL database."
-            else:
-                logging.error("Failed to extract a valid SQL query from the matched document.")
-                return "No valid SQL query was found in the matched document."
+                if isinstance(verification_response, str):
+                    verification_response = json.loads(verification_response)
 
-        # If no match is found, proceed with the regular process of deciding the database
-        logging.info("No match found in SQL collection. Proceeding to analyze the question and decide the database.")
+                verification_content = verification_response.get("message", {}).get("content", "").lower()
+                logging.info(f"Verification response from LLM: {verification_content}")
 
-        # Analyze the question and decide which database to query
-        decision_prompt = f"Analyze the question and decide if it should query the PostgreSQL database or ChromaDB: {question}"
-        decision_response = submit_prompt(ollama_client, model, decision_prompt, ollama_options, keep_alive)
-
-        # Ensure response is a dictionary
-        if isinstance(decision_response, str):
-            decision_response = json.loads(decision_response)
-
-        decision_content = decision_response.get("message", {}).get("content", "").lower()
-
-        if "chromadb" in decision_content:
-            logging.info("Bot decided to query ChromaDB.")
-
-            # Query ChromaDB (ddl_collection as default)
-            chromadb_response = query_chromadb(question)
-            if chromadb_response:
-                logging.info(f"Retrieved DDL structure from ChromaDB: {chromadb_response}")
-
-                # Flatten chromadb_response to handle nested lists
-                flattened_ddl = []
-                for item in chromadb_response:
-                    if isinstance(item, list):
-                        flattened_ddl.extend(item)
-                    else:
-                        flattened_ddl.append(item)
-
-                combined_ddl = " ".join(flattened_ddl).lower()
-
-                if 'geom' in combined_ddl:
-                    logging.info("Detected 'geom' column in DDL. Routing to spatial query logic.")
-
-                    spatial_docs_response = query_chromadb(question, table_name="documentation_collection")
-
-                    if spatial_docs_response:
-                        logging.info(f"Retrieved relevant spatial documentation: {spatial_docs_response}")
-
-                        sql_translation_prompt = f"Using the following PostGIS documentation: {spatial_docs_response}, translate this natural language query to a PostGIS SQL query: {question}"
-                    else:
-                        logging.warning("No relevant spatial documentation found. Attempting to generate SQL query using LLM.")
-                        sql_translation_prompt = f"Using the following DDL structure: {combined_ddl}, translate this natural language query to PostGIS SQL: {question}"
-
-                    sql_translation_response = submit_prompt(ollama_client, model, sql_translation_prompt, ollama_options, keep_alive)
-
-                    if isinstance(sql_translation_response, str):
-                        sql_translation_response = json.loads(sql_translation_response)
-
-                    sql_query = extract_sql(sql_translation_response.get("message", {}).get("content", ""))
-
-                    if not sql_query:
-                        logging.error("Failed to extract a valid SQL query.")
-                        return "No valid SQL query was generated."
-
-                    logging.info(f"Extracted SQL query: {sql_query}")
-
+                if "yes" in verification_content:
+                    logging.info(f"LLM confirmed the SQL query is valid: {matched_sql}")
                     with get_db_connection() as conn:
-                        results = query_db(conn, sql_query)
+                        results = query_db(conn, matched_sql)
                         if results:
-                            ingest_sql_into_chromadb(sql_query, question)
+                            logging.info("Returning query results from PostgreSQL.")
                             return pd.DataFrame(results).to_dict(orient='records')
                         else:
+                            logging.warning("No relevant data found in the PostgreSQL database.")
                             return "No relevant data found in the PostgreSQL database."
-
-                logging.info("No 'geom' column detected. Proceeding with standard SQL generation.")
-                sql_translation_prompt = f"Using the following DDL structure: {combined_ddl}, translate this natural language query to SQL: {question}"
-                sql_translation_response = submit_prompt(ollama_client, model, sql_translation_prompt, ollama_options, keep_alive)
-
-                if isinstance(sql_translation_response, str):
-                    sql_translation_response = json.loads(sql_translation_response)
-
-                sql_query = extract_sql(sql_translation_response.get("message", {}).get("content", ""))
-
-                if not sql_query:
-                    logging.error("Failed to extract a valid SQL query.")
-                    return "No valid SQL query was generated."
-
-                logging.info(f"Extracted SQL query: {sql_query}")
-
-                with get_db_connection() as conn:
-                    results = query_db(conn, sql_query)
-                    if results:
-                        ingest_sql_into_chromadb(sql_query, question)
-                        return pd.DataFrame(results).to_dict(orient='records')
-                    else:
-                        return "No relevant data found in the PostgreSQL database."
+                else:
+                    logging.warning(f"LLM did not confirm the SQL query. Response: {verification_content}")
 
             else:
-                return "No relevant information found in ChromaDB."
+                logging.warning(f"SQL query match has a low similarity score ({similarity_score}), skipping the match.")
 
-        elif "postgresql" in decision_content or "sql" in decision_content:
-            logging.info("Bot decided to query the PostgreSQL database.")
+        # Fallback: If no match or if similarity score is not acceptable
+        logging.info("No acceptable match found in SQL collection or LLM did not verify. Proceeding to generate new SQL query.")
 
-            sql_translation_prompt = f"Translate this natural language query to SQL: {question}"
-            sql_translation_response = submit_prompt(ollama_client, model, sql_translation_prompt, ollama_options, keep_alive)
+        # Step 5: Retrieve DDL structure from ChromaDB
+        logging.info("Retrieving DDL structure from ChromaDB.")
+        ddl_data = query_chromadb(question)
 
-            if isinstance(sql_translation_response, str):
-                sql_translation_response = json.loads(sql_translation_response)
-
-            sql_query = extract_sql(sql_translation_response.get("message", {}).get("content", ""))
-
-            if not sql_query:
-                logging.error("Failed to extract a valid SQL query.")
-                return "No valid SQL query was generated."
-
-            logging.info(f"Extracted SQL query: {sql_query}")
-
-            with get_db_connection() as conn:
-                results = query_db(conn, sql_query)
-                if results:
-                    ingest_sql_into_chromadb(sql_query, question)
-                    return pd.DataFrame(results).to_dict(orient='records')
-                else:
-                    return "No relevant data found in the PostgreSQL database."
-
+        # Step 6: Parse and categorize DDL structure
+        categorized_ddl = {}
+        if ddl_data:
+            logging.info("Parsing and categorizing DDL structure.")
+            for ddl in ddl_data:
+                parsed_data = parse_ddl(ddl)
+                if parsed_data:
+                    table_name = parsed_data.get("table_name")
+                    columns = parsed_data.get("columns", [])
+                    if table_name and columns:
+                        categorized_ddl[table_name] = {
+                            "numeric": [col["name"] for col in columns if col.get("type") in ["integer", "float", "decimal", "double precision"]],
+                            "spatial": [col["name"] for col in columns if col.get("type") in ["geometry", "geography"]],
+                            "text": [col["name"] for col in columns if col.get("type") in ["text", "varchar", "character varying"]]
+                        }
+            if categorized_ddl:
+                logging.info(f"Categorized DDL structure: {categorized_ddl}")
+            else:
+                logging.warning("No valid tables or columns found in the retrieved DDL data.")
         else:
-            logging.warning("The bot's decision was unclear.")
-            return "I couldn't understand where to search for the information. Please try rephrasing your question."
+            logging.warning("No DDL structure found in ChromaDB.")
+            categorized_ddl = {}
+
+        # Step 7: Enhanced semantic analysis
+        logging.info("Analyzing user question to determine query type.")
+        question_lower = question.lower()
+
+        # Define keywords for spatial, numeric, and aggregate analysis
+        spatial_keywords = ["geom", "geometry", "distance", "buffer", "spatial", "nearest", "intersection"]
+        aggregate_keywords = ["total", "sum", "average", "count", "length"]
+        numeric_keywords = ["total", "sum", "average", "count", "distance", "length", "measure"]
+
+        # Determine if the query should focus on spatial or numeric operations
+        is_spatial_query = any(keyword in question_lower for keyword in spatial_keywords)
+        is_numeric_query = any(keyword in question_lower for keyword in numeric_keywords)
+
+        # Step 8: Generate SQL query using LLM with appropriate context
+        prompt_columns = ""
+        for table, columns in categorized_ddl.items():
+            prompt_columns += f"Table: {table}, Numeric Columns: {', '.join(columns['numeric'])}, Spatial Columns: {', '.join(columns['spatial'])}, Text Columns: {', '.join(columns['text'])}\n"
+
+        if is_spatial_query:
+            logging.info("The question involves spatial data. Including spatial context in the prompt.")
+            sql_translation_prompt = (
+                f"Translate the following natural language query to an appropriate spatial SQL query: {question},\n"
+                f"Using the following tables and columns information:\n{prompt_columns}Include spatial operations such as ST_Distance or ST_Intersects if needed."
+            )
+        elif is_numeric_query:
+            logging.info("The question involves numeric data. Including numeric context in the prompt.")
+            sql_translation_prompt = (
+                f"Translate the following natural language query to SQL: {question},\n"
+                f"Using the following tables and columns information:\n{prompt_columns}Make sure to include aggregation functions like SUM or AVG if needed."
+            )
+        else:
+            logging.info("No specific spatial or numeric keywords found. Generating a general SQL query.")
+            sql_translation_prompt = (
+                f"Translate the following natural language query to SQL: {question},\n"
+                f"Using the following tables and columns information:\n{prompt_columns}"
+            )
+
+        # Submit the prompt to the LLM
+        sql_translation_response = submit_prompt(ollama_client, model, sql_translation_prompt, ollama_options, keep_alive)
+
+        if isinstance(sql_translation_response, str):
+            sql_translation_response = json.loads(sql_translation_response)
+
+        sql_query = extract_sql(sql_translation_response.get("message", {}).get("content", ""))
+
+        if not sql_query:
+            logging.error("Failed to extract a valid SQL query.")
+            return "No valid SQL query was generated."
+
+        logging.info(f"Generated SQL query: {sql_query}")
+
+        # Execute the SQL query using the connection pool
+        with get_db_connection() as conn:
+            results = query_db(conn, sql_query)
+            if results:
+                ingest_sql_into_chromadb(sql_query, question)
+                return pd.DataFrame(results).to_dict(orient='records')
+            else:
+                return "No relevant data found in the PostgreSQL database."
 
     except Exception as e:
         logging.error(f"Error chatting with the bot: {e}")
@@ -641,7 +622,7 @@ def embed_chat_history(chat_history, ollama_client, model):
     except Exception as e:
         logging.error(f"Error embedding chat history: {e}")
 
-def query_chromadb_collection(prompt, collection_name):
+def query_chromadb_collection(prompt, collection_name, similarity_threshold=0.8):
     """Query a specific ChromaDB collection using the provided prompt."""
     try:
         # Step 1: Retrieve or create the collection
@@ -665,26 +646,30 @@ def query_chromadb_collection(prompt, collection_name):
         embedding = response["embedding"]
         logging.info(f"Generated embedding for prompt: {embedding[:10]}...")  # Log first 10 values for brevity
 
-        # Step 3: Perform the query on the specified ChromaDB collection
+        # Step 3: Perform the query on the specified ChromaDB collection, returning similarity scores
         results = collection.query(
             query_embeddings=[embedding],
-            n_results=1  # Fetch the most relevant document
+            n_results=5,  # Fetch the most relevant document
+            include=["documents", "distances"]  # Return similarity scores
         )
 
-        # Log full results for debugging
         logging.debug(f"ChromaDB query results: {results}")
 
-        # Step 4: Check if results contain IDs and documents
-        if "ids" in results and results['ids']:
-            if "documents" in results and len(results['documents']) > 0 and len(results['documents'][0]) > 0:
-                data = results['documents'][0][0]
-                logging.info(f"Retrieved relevant information from {collection_name} collection: {data}")
-                return data
+        # Step 4: Check for valid results and verify similarity score
+        if results and "documents" in results and len(results['documents']) > 0:
+            document = results['documents'][0][0]
+            similarity_score = results['distances'][0][0]
+
+            logging.info(f"Retrieved document with similarity score: {similarity_score}")
+
+            if similarity_score >= similarity_threshold:
+                logging.info(f"Relevant information retrieved from {collection_name} with similarity score {similarity_score}: {document}")
+                return document
             else:
-                logging.warning(f"Documents array is empty in {collection_name} collection. Results: {results}")
+                logging.warning(f"Low similarity score {similarity_score}. Ignoring result.")
                 return None
         else:
-            logging.warning(f"No matching document found in {collection_name}. Results: {results}")
+            logging.warning(f"No matching document found in {collection_name}.")
             return None
 
     except json.JSONDecodeError as e:
@@ -746,7 +731,7 @@ def query_db(conn, query, params=None):
 
 def query_chromadb(prompt, table_name=None, srid=None):
     """Query the global ddl_collection using the prompt, with optional table name and SRID filters."""
-    global client, ddl_collection  # Ensure the global client and ddl_collection are used
+    global client, ddl_collection
 
     try:
         if not client or not ddl_collection:
@@ -758,17 +743,17 @@ def query_chromadb(prompt, table_name=None, srid=None):
             "ollama_host": "http://localhost:11434"
         })
 
-        # Generate embedding for the prompt (natural language query) using the Ollama client
+        # Generate embedding for the prompt (natural language query)
         response = ollama_client.embed(
-            model="bge-m3",  # Use the model suited for embeddings
-            input=prompt  # The user's query for embedding
+            model="bge-m3",
+            input=prompt
         )
-        embedding = response["embeddings"][0]  # Extract the embedding from the response
+        embedding = response["embeddings"][0]
 
         # Prepare query arguments for ChromaDB
         query_kwargs = {
-            "query_embeddings": [embedding],  # Use embedding generated from the prompt
-            "n_results": 5  # Fetch the most relevant documents (adjust if needed)
+            "query_embeddings": [embedding],
+            "n_results": 5
         }
 
         # Apply optional filters for table_name and SRID
@@ -782,18 +767,66 @@ def query_chromadb(prompt, table_name=None, srid=None):
         # Execute the query on the ddl_collection
         results = ddl_collection.query(**query_kwargs)
 
-        if results['ids']:
-            # Process and return the retrieved documents
-            retrieved_data = [doc for doc in results['documents']]  # Return only documents
-            return retrieved_data  # Return list of relevant documents
+        logging.info(f"Retrieved DDL query results: {results}")
+
+        if results and 'documents' in results:
+            # Extract documents
+            flattened_documents = []
+            for document_list in results['documents']:
+                if isinstance(document_list, list):
+                    flattened_documents.extend(document_list)
+                else:
+                    flattened_documents.append(document_list)
+
+            return flattened_documents if flattened_documents else []
+
         else:
             logging.warning(f"No matching document found in ddl_collection.")
-            return []  # Return an empty list if no documents found
+            return []
 
     except Exception as e:
         logging.error(f"Error querying ddl_collection: {e}")
         return []
 
+def parse_ddl(ddl):
+    """
+    Extract table name and columns from a given DDL statement.
+    """
+    try:
+        table_pattern = re.compile(r'CREATE TABLE IF NOT EXISTS (\w+) \(')
+        column_pattern = re.compile(r'(\w+) (\w+)')
+
+        table_name_match = table_pattern.search(ddl)
+        if not table_name_match:
+            return None
+
+        table_name = table_name_match.group(1)
+        columns = []
+
+        for match in column_pattern.finditer(ddl):
+            column_name, column_type = match.groups()
+            columns.append({"name": column_name, "type": column_type})
+
+        return {"table_name": table_name, "columns": columns}
+
+    except Exception as e:
+        logging.error(f"Error parsing DDL: {e}")
+        return None
+
+def parse_columns_from_ddl(ddl_text):
+    """Extract column names and types from a given DDL text."""
+    columns = {}
+    column_pattern = re.compile(r'(\w+)\s+(\w+(\([^)]+\))?)')
+    
+    for line in ddl_text.splitlines():
+        match = column_pattern.search(line.strip())
+        if match:
+            column_name = match.group(1)
+            column_type = match.group(2)
+            columns[column_name] = column_type.lower()
+
+    return columns
+	
 # Function to submit prompt to Ollama
 def submit_prompt(ollama_client, model, prompt, ollama_options, keep_alive=None):
     logging.info(f"Ollama parameters: model={model}, options={ollama_options}, keep_alive={keep_alive}")
